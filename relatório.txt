@@ -1,0 +1,114 @@
+INF1018 - Software Básico - Trabalho 2026.2
+Gerador de Codigo com Funções (LBS)
+
+Integrantes:
+Felipe Nunes   2320615  3WA
+Manuela Borba  2510272  3WA
+ 
+ 
+1. O QUE ESTÁ FUNCIONANDO:
+ 
+Todas as funcionalidades pedidas no enunciado foram implementadas e estão funcionando, elas são:
+ 
+  - leitura de um arquivo com uma ou mais funções LBS.
+  - atribuições com operações aritméticas (+, - e *), com operandos que podem ser variáveis locais (v0 a v4), o parâmetro (p0) ou constantes (positivas e negativas).
+  - chamada de funções (call), inclusive chamadas recursivas e chamadas a funções definidas antes no arquivo.
+  - retorno incondicional (ret) e retorno condicional (zret).
+  - retorno, via o parâmetro entry, do endereço da última função do arquivo.
+ 
+Cada função gerada começa com o prólogo padrão (push %rbp,mov %rsp,%rbp, sub $32,%rsp) e termina com leave/ret. As variáveis locais ficam na pilha (v0 em -4(%rbp) até v4 em -20(%rbp)), e o parâmetro p0 e copiado de %edi para -24(%rbp) no início da função, para não ser perdido quando a função faz uma chamada. O frame de 32 bytes mantem a pilha alinhada em 16 bytes nas chamadas.
+ 
+O código gerado usa apenas os registradores %eax, %ecx e %edi, que são caller-saved; por isso não e necessário salvar registradores callee-saved.
+ 
+ 
+2. O QUE NÃO ESTA FUNCIONANDO:
+ 
+Não identificamos nenhum problema no funcionamento do código. Todos os testes que realizamos estão abaixo e produziram o resultado esperado.
+Em contra partida, nosso trabalho enfrenta duas limitações que não afetam o desempenho do projeto. Essas limitações são:
+
+   - O comando "end" não gera instruções. Uma função que não termine com "ret" (por exemplo, cuja última linha seja um "zret" ou uma atribuição) continua executando os bytes seguintes do vetor, podendo executar outra função ou causar falha de segmentação. Supomos, como nos exemplos do enunciado, que toda função termina com "ret".
+    - A função gera_codigo não recebe o tamanho do vetor code, então não verifica se o código gerado cabe nele. Cada linha LBS gera no máximo 16 bytes; um arquivo de 50 linhas pode gerar cerca de 800 bytes, mais que um vetor de 500 posições. Nos exemplos testados o código gerado ficou bem abaixo desse limite (o fatorial, por exemplo, gera 71 bytes).
+ 
+3. EXEMPLOS DE TESTE:
+ 
+Os testes foram feitos com um main separado (nao entregue), executado como:  ./teste arquivo.lbs argumento
+ 
+Exemplo 1 - retorna uma constante
+  function
+  ret $100
+  end
+  Argumento 7 -> 100 (correto)
+ 
+Exemplo 2 - retorna o parametro
+  function
+  ret p0
+  end
+  Argumento -42 -> -42 (correto)
+ 
+Exemplo 3 - soma 1 ao parametro (inc.lbs)
+  function
+  v0 = p0 + $1
+  ret v0
+  end
+  Argumento 10 -> 11 (correto)
+ 
+Exemplo 4 - fatorial (recursao e zret)
+  function
+  zret p0 $1
+  v0 = p0 + $0
+  v1 = v0 - $1
+  v1 = call 0 v1
+  v0 = v0 * v1
+  ret v0
+  end
+  Argumento 0 -> 1, argumento 5 -> 120, argumento 10 -> 3628800 (corretos)
+ 
+Exemplo 5 - soma dos quadrados de 1 ate p0 (somaquad.lbs, duas funcoes)
+  function
+  v0 = p0 * p0
+  ret v0
+  end
+  function
+  zret p0 $0
+  v0 = p0 - $1
+  v1 = call 0 p0
+  v0 = call 1 v0
+  v0 = v0 + v1
+  ret v0
+  end
+  Argumento 3 -> 14, argumento 10 -> 385 (corretos)
+ 
+Exemplo 6 - constantes negativas, multiplicação, variáveis v3 e v4 e zret com constante
+  function
+  v4 = p0 * $-3
+  v3 = $2000000 - v4
+  zret $0 v3
+  ret $7
+  end
+  Argumento 4 -> 2000012 (correto: v4 = -12, v3 = 2000000 + 12)
+ 
+Exemplo 7 - zret verdadeiro e falso
+  function
+  zret p0 $99
+  ret $-5
+  end
+  Argumento 0 -> 99, argumento 3 -> -5 (corretos)
+ 
+Exemplo 8 - três funções, a última chama uma que chama outra
+  function
+  v0 = p0 + $1
+  ret v0
+  end
+  function
+  v1 = call 0 p0
+  v2 = call 0 v1
+  v0 = v1 * v2
+  ret v0
+  end
+  function
+  v0 = call 1 p0
+  v1 = call 0 v0
+  ret v1
+  end
+  Argumento 2 -> 13 (correto: f1(2) = 3 * 4 = 12; f0(12) = 13)
+ 
