@@ -6,225 +6,272 @@
 #include <string.h>
 #include "gera_codigo.h"
 
+#define MAX_LINHA 256
+#define MAX_FUNCS 50
 
+/*
+ * Layout da pilha no registro de ativacao (em relacao a %rbp):
+ *   v0: -4(%rbp)
+ *   v1: -8(%rbp)
+ *   v2: -12(%rbp)
+ *   v3: -16(%rbp)
+ *   v4: -20(%rbp)
+ *   p0: -24(%rbp) (copia de %edi salva no prologo)
+ *
+ * Alocamos 32 bytes de frame (subq $32, %rsp) para acomodar
+ * todas as variaveis e manter %rsp alinhado em 16 bytes antes
+ * de eventuais chamadas (call), atendendo a ABI x86-64 do Linux.
+ */
 
-#define MAX_LINHA   256
-#define MAX_FUNCS   50
-#define NUM_VARS    5
-
-/* Layout do registro de ativacao (relativo a %rbp):
- *   v0 = -4(%rbp), v1 = -8(%rbp), ..., v4 = -20(%rbp)
- *   p0 (copia do %edi) = -24(%rbp)
- * Frame de 32 bytes: mantem %rsp alinhado em 16 bytes nas chamadas. */
-#define OFFSET_P0   (-4 * (NUM_VARS + 1))
-#define TAM_FRAME   32
-
-/* Numero do registrador (campo reg do ModRM / soma no opcode mov imm) */
-typedef enum { REG_EAX = 0, REG_ECX = 1, REG_EDI = 7 } Reg;
-
-typedef enum { OPD_VAR, OPD_PARAM, OPD_CONST } TipoOperando;
-
-typedef struct {
-    TipoOperando tipo;
-    int valor;              /* indice da variavel ou valor da constante */
-} Operando;
-
-typedef struct {
-    unsigned char *buf;     /* vetor code passado pelo usuario */
-    int pos;                /* proxima posicao livre */
-} Codigo;
-
-/* ------------------------------------------------------------------ */
-/* Modulo 1: emissao de bytes                                          */
-/* ------------------------------------------------------------------ */
-
-static void emite_byte(Codigo *c, unsigned char b)
+/* Emite um inteiro de 32 bits em formato little-endian */
+static void emite_int32(unsigned char code[], int *pos, int val)
 {
-    c->buf[c->pos++] = b;
+    unsigned int u = (unsigned int)val;
+    code[(*pos)++] = (unsigned char)(u & 0xFF);
+    code[(*pos)++] = (unsigned char)((u >> 8) & 0xFF);
+    code[(*pos)++] = (unsigned char)((u >> 16) & 0xFF);
+    code[(*pos)++] = (unsigned char)((u >> 24) & 0xFF);
 }
 
-static void emite_int32(Codigo *c, int v)
+/* Retorna o deslocamento relativo a %rbp de uma variavel ou parametro */
+static int calc_offset(char tipo, int idx)
 {
-    unsigned int u = (unsigned int)v;
-    int i;
-    for (i = 0; i < 4; i++)
-        emite_byte(c, (unsigned char)((u >> (8 * i)) & 0xFF));
+    if (tipo == 'p')
+        return -24;             /* p0 salvo em -24(%rbp) */
+    return -4 * (idx + 1);      /* v0 em -4, v1 em -8, ..., v4 em -20 */
 }
 
-/* ------------------------------------------------------------------ */
-/* Modulo 2: instrucoes x86-64 basicas                                 */
-/* ------------------------------------------------------------------ */
-
-static int offset_operando(Operando op)
+/* Carrega operando (constante $, parametro p ou variavel v) no registrador %eax */
+static void carrega_eax(unsigned char code[], int *pos, char tipo, int val)
 {
-    if (op.tipo == OPD_PARAM)
-        return OFFSET_P0;
-    return -4 * (op.valor + 1);
-}
-
-/* mov <op>, %reg   (op pode ser constante, variavel ou parametro) */
-static void emite_carrega(Codigo *c, Reg r, Operando op)
-{
-    if (op.tipo == OPD_CONST) {
-        emite_byte(c, 0xb8 + r);                 /* mov $imm32, %reg */
-        emite_int32(c, op.valor);
+    if (tipo == '$') {
+        /* movl $val, %eax (b8 <imm32>) */
+        code[(*pos)++] = 0xb8;
+        emite_int32(code, pos, val);
     } else {
-        emite_byte(c, 0x8b);                     /* mov disp8(%rbp), %reg */
-        emite_byte(c, 0x45 | (r << 3));
-        emite_byte(c, (unsigned char)offset_operando(op));
+        /* movl disp8(%rbp), %eax (8b 45 <disp8>) */
+        code[(*pos)++] = 0x8b;
+        code[(*pos)++] = 0x45;
+        code[(*pos)++] = (unsigned char)calc_offset(tipo, val);
     }
 }
 
-/* mov %reg, v<idx> */
-static void emite_guarda_var(Codigo *c, Reg r, int idx)
+/* Carrega operando no registrador %ecx */
+static void carrega_ecx(unsigned char code[], int *pos, char tipo, int val)
 {
-    Operando v = { OPD_VAR, idx };
-    emite_byte(c, 0x89);                         /* mov %reg, disp8(%rbp) */
-    emite_byte(c, 0x45 | (r << 3));
-    emite_byte(c, (unsigned char)offset_operando(v));
+    if (tipo == '$') {
+        /* movl $val, %ecx (b9 <imm32>) */
+        code[(*pos)++] = 0xb9;
+        emite_int32(code, pos, val);
+    } else {
+        /* movl disp8(%rbp), %ecx (8b 4d <disp8>) */
+        code[(*pos)++] = 0x8b;
+        code[(*pos)++] = 0x4d;
+        code[(*pos)++] = (unsigned char)calc_offset(tipo, val);
+    }
 }
 
-/* push %rbp; mov %rsp,%rbp; sub $32,%rsp; mov %edi,-24(%rbp) */
-static void emite_prologo(Codigo *c)
+/* Carrega operando no registrador %edi (primeiro argumento para chamada de funcao) */
+static void carrega_edi(unsigned char code[], int *pos, char tipo, int val)
 {
-    Operando p0 = { OPD_PARAM, 0 };
-    emite_byte(c, 0x55);
-    emite_byte(c, 0x48); emite_byte(c, 0x89); emite_byte(c, 0xe5);
-    emite_byte(c, 0x48); emite_byte(c, 0x83); emite_byte(c, 0xec);
-    emite_byte(c, TAM_FRAME);
-    emite_byte(c, 0x89); emite_byte(c, 0x7d);
-    emite_byte(c, (unsigned char)offset_operando(p0));
+    if (tipo == '$') {
+        /* movl $val, %edi (bf <imm32>) */
+        code[(*pos)++] = 0xbf;
+        emite_int32(code, pos, val);
+    } else {
+        /* movl disp8(%rbp), %edi (8b 7d <disp8>) */
+        code[(*pos)++] = 0x8b;
+        code[(*pos)++] = 0x7d;
+        code[(*pos)++] = (unsigned char)calc_offset(tipo, val);
+    }
 }
 
-/* leave; ret */
-static void emite_epilogo(Codigo *c)
+/* Salva o valor de %eax na variavel local v<idx> (movl %eax, disp8(%rbp)) */
+static void salva_var(unsigned char code[], int *pos, int idx)
 {
-    emite_byte(c, 0xc9);
-    emite_byte(c, 0xc3);
+    code[(*pos)++] = 0x89;
+    code[(*pos)++] = 0x45;
+    code[(*pos)++] = (unsigned char)calc_offset('v', idx);
 }
 
-/* ------------------------------------------------------------------ */
-/* Modulo 3: traducao de cada comando LBS                              */
-/* ------------------------------------------------------------------ */
-
-/* v<dst> = a op b */
-static void traduz_oper(Codigo *c, int dst, Operando a, char op, Operando b)
+/*
+ * Prologo padrao da funcao:
+ *   pushq %rbp              (55)
+ *   movq  %rsp, %rbp        (48 89 e5)
+ *   subq  $32, %rsp         (48 83 ec 20)
+ *   movl  %edi, -24(%rbp)   (89 7d e8)
+ */
+static void gera_prologo(unsigned char code[], int *pos)
 {
-    emite_carrega(c, REG_EAX, a);
-    emite_carrega(c, REG_ECX, b);
+    code[(*pos)++] = 0x55;
+    code[(*pos)++] = 0x48; code[(*pos)++] = 0x89; code[(*pos)++] = 0xe5;
+    code[(*pos)++] = 0x48; code[(*pos)++] = 0x83; code[(*pos)++] = 0xec; code[(*pos)++] = 0x20;
+    code[(*pos)++] = 0x89; code[(*pos)++] = 0x7d; code[(*pos)++] = 0xe8;
+}
+
+/*
+ * Epilogo padrao da funcao:
+ *   leave                   (c9)
+ *   ret                     (c3)
+ */
+static void gera_epilogo(unsigned char code[], int *pos)
+{
+    code[(*pos)++] = 0xc9;
+    code[(*pos)++] = 0xc3;
+}
+
+/* Extrai o tipo ('$', 'v' ou 'p') e o valor numerico de uma string de operando */
+static void interpreta_operando(const char *str, char *tipo, int *val)
+{
+    *tipo = str[0];
+    if (*tipo == '$' || *tipo == 'v')
+        *val = atoi(str + 1);
+    else
+        *val = 0; /* 'p' -> p0 */
+}
+
+/* Traduz atribuicao com operacao aritmetica: v<dst> = op1 <operador> op2 */
+static void gera_operacao(unsigned char code[], int *pos, int dst,
+                          char tipo1, int val1, char op, char tipo2, int val2)
+{
+    carrega_eax(code, pos, tipo1, val1);
+    carrega_ecx(code, pos, tipo2, val2);
+
     switch (op) {
-    case '+': emite_byte(c, 0x01); emite_byte(c, 0xc8); break; /* add %ecx,%eax  */
-    case '-': emite_byte(c, 0x29); emite_byte(c, 0xc8); break; /* sub %ecx,%eax  */
-    case '*': emite_byte(c, 0x0f); emite_byte(c, 0xaf);
-              emite_byte(c, 0xc1); break;                      /* imul %ecx,%eax */
+    case '+':
+        /* addl %ecx, %eax (01 c8) */
+        code[(*pos)++] = 0x01;
+        code[(*pos)++] = 0xc8;
+        break;
+    case '-':
+        /* subl %ecx, %eax (29 c8) */
+        code[(*pos)++] = 0x29;
+        code[(*pos)++] = 0xc8;
+        break;
+    case '*':
+        /* imull %ecx, %eax (0f af c1) */
+        code[(*pos)++] = 0x0f;
+        code[(*pos)++] = 0xaf;
+        code[(*pos)++] = 0xc1;
+        break;
     }
-    emite_guarda_var(c, REG_EAX, dst);
+
+    salva_var(code, pos, dst);
 }
 
-/* v<dst> = call func arg */
-static void traduz_call(Codigo *c, int dst, int func, Operando arg,
-                        const int offsets[])
+/* Traduz chamada de funcao: v<dst> = call <num_func> <arg> */
+static void gera_call(unsigned char code[], int *pos, int dst,
+                      int num_func, char tipo_arg, int val_arg, const int offsets[])
 {
     int rel;
-    emite_carrega(c, REG_EDI, arg);
-    emite_byte(c, 0xe8);                              /* call rel32 */
-    rel = offsets[func] - (c->pos + 4);
-    emite_int32(c, rel);
-    emite_guarda_var(c, REG_EAX, dst);
+
+    /* Passa o argumento varpc em %edi */
+    carrega_edi(code, pos, tipo_arg, val_arg);
+
+    /* call rel32 (e8 <disp32>) */
+    code[(*pos)++] = 0xe8;
+    rel = offsets[num_func] - (*pos + 4);
+    emite_int32(code, pos, rel);
+
+    /* Guarda o valor de retorno (%eax) na variavel de destino */
+    salva_var(code, pos, dst);
 }
 
-/* ret a */
-static void traduz_ret(Codigo *c, Operando a)
+/* Traduz retorno incondicional: ret <arg> */
+static void gera_ret(unsigned char code[], int *pos, char tipo, int val)
 {
-    emite_carrega(c, REG_EAX, a);
-    emite_epilogo(c);
+    carrega_eax(code, pos, tipo, val);
+    gera_epilogo(code, pos);
 }
 
-/* zret a b: se a == 0 retorna b */
-static void traduz_zret(Codigo *c, Operando a, Operando b)
+/* Traduz retorno condicional: zret <cond> <val> (retorna val se cond == 0) */
+static void gera_zret(unsigned char code[], int *pos,
+                      char tipo_cond, int val_cond, char tipo_val, int val_val)
 {
-    int pos_desvio;
-    emite_carrega(c, REG_EAX, a);
-    emite_byte(c, 0x83); emite_byte(c, 0xf8); emite_byte(c, 0x00); /* cmp $0,%eax */
-    emite_byte(c, 0x75);                                           /* jne rel8 */
-    pos_desvio = c->pos;
-    emite_byte(c, 0x00);                                           /* placeholder */
-    traduz_ret(c, b);
-    c->buf[pos_desvio] = (unsigned char)(c->pos - (pos_desvio + 1));
+    int pos_salto;
+
+    /* Carrega o primeiro operando e testa se e zero */
+    carrega_eax(code, pos, tipo_cond, val_cond);
+    code[(*pos)++] = 0x83; code[(*pos)++] = 0xf8; code[(*pos)++] = 0x00; /* cmpl $0, %eax */
+
+    /* Salta o retorno caso nao seja zero (jne rel8) */
+    code[(*pos)++] = 0x75;
+    pos_salto = (*pos)++;
+
+    /* Se for zero, executa o retorno */
+    gera_ret(code, pos, tipo_val, val_val);
+
+    /* Preenche o deslocamento do salto para continuar o fluxo */
+    code[pos_salto] = (unsigned char)(*pos - (pos_salto + 1));
 }
 
-/* ------------------------------------------------------------------ */
-/* Modulo 4: parsing das linhas LBS                                    */
-/* ------------------------------------------------------------------ */
-
-static Operando parse_operando(const char *s)
-{
-    Operando op;
-    op.valor = 0;
-    switch (s[0]) {
-    case 'v': op.tipo = OPD_VAR;   op.valor = atoi(s + 1); break;
-    case 'p': op.tipo = OPD_PARAM; break;
-    default:  op.tipo = OPD_CONST; op.valor = atoi(s + 1); break; /* '$' */
-    }
-    return op;
-}
-
-static void trata_ret(Codigo *c, const char *linha)
-{
-    char a[32];
-    sscanf(linha, "ret %31s", a);
-    traduz_ret(c, parse_operando(a));
-}
-
-static void trata_zret(Codigo *c, const char *linha)
-{
-    char a[32], b[32];
-    sscanf(linha, "zret %31s %31s", a, b);
-    traduz_zret(c, parse_operando(a), parse_operando(b));
-}
-
-static void trata_atribuicao(Codigo *c, const char *linha, const int offsets[])
-{
-    int dst;
-    char t1[32], t2[32], t3[32];
-
-    sscanf(linha, "v%d = %31s %31s %31s", &dst, t1, t2, t3);
-    if (strcmp(t1, "call") == 0)
-        traduz_call(c, dst, atoi(t2), parse_operando(t3), offsets);
-    else
-        traduz_oper(c, dst, parse_operando(t1), t2[0], parse_operando(t3));
-}
-
-/* ------------------------------------------------------------------ */
-/* Funcao principal                                                    */
-/* ------------------------------------------------------------------ */
-
+/* Funcao principal geradora de codigo */
 void gera_codigo(FILE *f, unsigned char code[], funcp *entry)
 {
-    Codigo c;
     char linha[MAX_LINHA];
     int offsets[MAX_FUNCS];
-    int nfuncs = 0;
+    int num_funcs = 0;
+    int pos = 0;
 
-    c.buf = code;
-    c.pos = 0;
     *entry = NULL;
 
-    while (fgets(linha, sizeof linha, f) != NULL) {
-        if (strncmp(linha, "function", 8) == 0) {
-            offsets[nfuncs++] = c.pos;
-            emite_prologo(&c);
-        } else if (strncmp(linha, "end", 3) == 0) {
-            /* nada a emitir: o ret da funcao ja gera o epilogo */
-        } else if (strncmp(linha, "ret", 3) == 0) {
-            trata_ret(&c, linha);
-        } else if (strncmp(linha, "zret", 4) == 0) {
-            trata_zret(&c, linha);
-        } else if (linha[0] == 'v') {
-            trata_atribuicao(&c, linha, offsets);
+    while (fgets(linha, sizeof(linha), f) != NULL) {
+        char *p = linha;
+        char token1[32], token2[32], token3[32];
+        int dst;
+
+        /* Pula espacos ou tabulacoes no inicio da linha */
+        while (*p == ' ' || *p == '\t')
+            p++;
+
+        /* Ignora linhas em branco */
+        if (*p == '\n' || *p == '\r' || *p == '\0')
+            continue;
+
+        if (strncmp(p, "function", 8) == 0) {
+            offsets[num_funcs++] = pos;
+            gera_prologo(code, &pos);
+        }
+        else if (strncmp(p, "end", 3) == 0) {
+            /* Fim da funcao; o retorno com epilogo ja foi emitido pelo ret */
+        }
+        else if (strncmp(p, "ret", 3) == 0) {
+            char arg[32];
+            char tipo;
+            int val;
+            if (sscanf(p, "ret %31s", arg) == 1) {
+                interpreta_operando(arg, &tipo, &val);
+                gera_ret(code, &pos, tipo, val);
+            }
+        }
+        else if (strncmp(p, "zret", 4) == 0) {
+            char cond[32], retv[32];
+            char tipo_cond, tipo_retv;
+            int val_cond, val_retv;
+            if (sscanf(p, "zret %31s %31s", cond, retv) == 2) {
+                interpreta_operando(cond, &tipo_cond, &val_cond);
+                interpreta_operando(retv, &tipo_retv, &val_retv);
+                gera_zret(code, &pos, tipo_cond, val_cond, tipo_retv, val_retv);
+            }
+        }
+        else if (sscanf(p, "v%d = %31s %31s %31s", &dst, token1, token2, token3) == 4) {
+            if (strcmp(token1, "call") == 0) {
+                int num_chamada = atoi(token2);
+                char tipo_arg;
+                int val_arg;
+                interpreta_operando(token3, &tipo_arg, &val_arg);
+                gera_call(code, &pos, dst, num_chamada, tipo_arg, val_arg, offsets);
+            } else {
+                char tipo1, tipo2;
+                int val1, val2;
+                char op = token2[0];
+                interpreta_operando(token1, &tipo1, &val1);
+                interpreta_operando(token3, &tipo2, &val2);
+                gera_operacao(code, &pos, dst, tipo1, val1, op, tipo2, val2);
+            }
         }
     }
 
-    if (nfuncs > 0)
-        *entry = (funcp)(code + offsets[nfuncs - 1]);
+    if (num_funcs > 0)
+        *entry = (funcp)(code + offsets[num_funcs - 1]);
 }
