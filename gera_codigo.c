@@ -28,28 +28,24 @@ typedef struct {
 } Operando;
 
 typedef struct {
-    unsigned char *buf;/* vetor code passado pelo usuario */
-    int pos; /* proxima posicao livre */
-} Codigo;
+    unsigned char *codigo;
+    int tamanho;
+} Gerador;
 
-/* Modulo 1: emissao de bytes       */
- 
-static void emite_byte(Codigo *c, unsigned char b)
+static void emite_byte(Gerador *gerador, unsigned char byte)
 {
-    c->buf[c->pos++] = b;
+    gerador->codigo[gerador->tamanho++] = byte;
 }
 
-static void emite_int32(Codigo *c, int v)
+static void emite_int32(Gerador *gerador, int valor)
 {
-    unsigned int u = (unsigned int)v;
-    int i;
-    for (i = 0; i < 4; i++)
-        emite_byte(c, (unsigned char)((u >> (8 * i)) & 0xFF));
+    unsigned int u = (unsigned int)valor;
+    int parte;
+    for (parte = 0; parte < 4; parte++)
+        emite_byte(gerador, (unsigned char)((u >> (8 * parte)) & 0xFF));
 }
 
-/* Modulo 2: instrucoes x86-64 basicas    */
- 
-static int offset_operando(Operando op)
+static int deslocamento_operando(Operando op)
 {
     if (op.tipo == OPD_PARAM)
         return OFFSET_P0;
@@ -57,161 +53,155 @@ static int offset_operando(Operando op)
 }
 
 /* mov <op>, %reg   (op pode ser constante, variavel ou parametro) */
-static void emite_carrega(Codigo *c, Reg r, Operando op)
+static void emite_carrega(Gerador *gerador, Reg reg, Operando op)
 {
     if (op.tipo == OPD_CONST) {
-        emite_byte(c, 0xb8 + r); /* mov $imm32, %reg */
-        emite_int32(c, op.valor);
+        emite_byte(gerador, 0xb8 + reg); /* mov $imm32, %reg */
+        emite_int32(gerador, op.valor);
     } else {
-        emite_byte(c, 0x8b); /* mov disp8(%rbp), %reg */
-        emite_byte(c, 0x45 | (r << 3));
-        emite_byte(c, (unsigned char)offset_operando(op));
+        emite_byte(gerador, 0x8b); /* mov disp8(%rbp), %reg */
+        emite_byte(gerador, 0x45 | (reg << 3));
+        emite_byte(gerador, (unsigned char)deslocamento_operando(op));
     }
 }
 
 /* mov %reg, v<idx> */
-static void emite_guarda_var(Codigo *c, Reg r, int idx)
+static void grava_variavel(Gerador *gerador, Reg reg, int indice)
 {
-    Operando v = { OPD_VAR, idx };
-    emite_byte(c, 0x89);    /* mov %reg, disp8(%rbp) */
-    emite_byte(c, 0x45 | (r << 3));
-    emite_byte(c, (unsigned char)offset_operando(v));
+    Operando variavel = { OPD_VAR, indice };
+    emite_byte(gerador, 0x89);    /* mov %reg, disp8(%rbp) */
+    emite_byte(gerador, 0x45 | (reg << 3));
+    emite_byte(gerador, (unsigned char)deslocamento_operando(variavel));
 }
 
 /* push %rbp; mov %rsp,%rbp; sub $32,%rsp; mov %edi,-24(%rbp) */
-static void emite_prologo(Codigo *c)
+static void abre_funcao(Gerador *gerador)
 {
     Operando p0 = { OPD_PARAM, 0 };
-    emite_byte(c, 0x55);
-    emite_byte(c, 0x48); emite_byte(c, 0x89); emite_byte(c, 0xe5);
-    emite_byte(c, 0x48); emite_byte(c, 0x83); emite_byte(c, 0xec);
-    emite_byte(c, TAM_FRAME);
-    emite_byte(c, 0x89); emite_byte(c, 0x7d);
-    emite_byte(c, (unsigned char)offset_operando(p0));
+    emite_byte(gerador, 0x55);
+    emite_byte(gerador, 0x48); emite_byte(gerador, 0x89); emite_byte(gerador, 0xe5);
+    emite_byte(gerador, 0x48); emite_byte(gerador, 0x83); emite_byte(gerador, 0xec);
+    emite_byte(gerador, TAM_FRAME);
+    emite_byte(gerador, 0x89); emite_byte(gerador, 0x7d);
+    emite_byte(gerador, (unsigned char)deslocamento_operando(p0));
 }
 
 /* leave; ret */
-static void emite_epilogo(Codigo *c)
+static void fecha_funcao(Gerador *gerador)
 {
-    emite_byte(c, 0xc9);
-    emite_byte(c, 0xc3);
+    emite_byte(gerador, 0xc9);
+    emite_byte(gerador, 0xc3);
 }
 
-/* Modulo 3: traducao de cada comando LBS */
- 
-/* v<dst> = a op b */
-static void traduz_oper(Codigo *c, int dst, Operando a, char op, Operando b)
+/* v<destino> = primeiro operador segundo */
+static void gera_operacao(Gerador *gerador, int destino, Operando primeiro, char operador, Operando segundo)
 {
-    emite_carrega(c, REG_EAX, a);
-    emite_carrega(c, REG_ECX, b);
-    switch (op) {
-    case '+': emite_byte(c, 0x01); emite_byte(c, 0xc8); break; /* add %ecx,%eax  */
-    case '-': emite_byte(c, 0x29); emite_byte(c, 0xc8); break; /* sub %ecx,%eax  */
-    case '*': emite_byte(c, 0x0f); emite_byte(c, 0xaf);
- emite_byte(c, 0xc1); break; /* imul %ecx,%eax */
+    emite_carrega(gerador, REG_EAX, primeiro);
+    emite_carrega(gerador, REG_ECX, segundo);
+    switch (operador) {
+    case '+': emite_byte(gerador, 0x01); emite_byte(gerador, 0xc8); break; /* add %ecx,%eax  */
+    case '-': emite_byte(gerador, 0x29); emite_byte(gerador, 0xc8); break; /* sub %ecx,%eax  */
+    case '*': emite_byte(gerador, 0x0f); emite_byte(gerador, 0xaf);
+ emite_byte(gerador, 0xc1); break; /* imul %ecx,%eax */
     }
-    emite_guarda_var(c, REG_EAX, dst);
+    grava_variavel(gerador, REG_EAX, destino);
 }
 
-/* v<dst> = call func arg */
-static void traduz_call(Codigo *c, int dst, int func, Operando arg,const int offsets[])
+/* v<destino> = call funcao argumento */
+static void gera_chamada(Gerador *gerador, int destino, int funcao, Operando argumento, const int inicio_funcoes[])
 {
-    int rel;
-    emite_carrega(c, REG_EDI, arg);
-    emite_byte(c, 0xe8); /* call rel32 */
-    rel = offsets[func] - (c->pos + 4);
-    emite_int32(c, rel);
-    emite_guarda_var(c, REG_EAX, dst);
+    int distancia;
+    emite_carrega(gerador, REG_EDI, argumento);
+    emite_byte(gerador, 0xe8); /* call rel32 */
+    distancia = inicio_funcoes[funcao] - (gerador->tamanho + 4);
+    emite_int32(gerador, distancia);
+    grava_variavel(gerador, REG_EAX, destino);
 }
 
 /* ret a */
-static void traduz_ret(Codigo *c, Operando a)
+static void gera_retorno(Gerador *gerador, Operando valor)
 {
-    emite_carrega(c, REG_EAX, a);
-    emite_epilogo(c);
+    emite_carrega(gerador, REG_EAX, valor);
+    fecha_funcao(gerador);
 }
 
 /* zret a b: se a == 0 retorna b */
-static void traduz_zret(Codigo *c, Operando a, Operando b)
+static void gera_retorno_condicional(Gerador *gerador, Operando condicao, Operando valor)
 {
-    int pos_desvio;
-    emite_carrega(c, REG_EAX, a);
-    emite_byte(c, 0x83); emite_byte(c, 0xf8); emite_byte(c, 0x00); /* cmp $0,%eax */
-    emite_byte(c, 0x75);        /* jne rel8 */
-    pos_desvio = c->pos;
-    emite_byte(c, 0x00);        /* placeholder */
-    traduz_ret(c, b);
-    c->buf[pos_desvio] = (unsigned char)(c->pos - (pos_desvio + 1));
+    int desvio;
+    emite_carrega(gerador, REG_EAX, condicao);
+    emite_byte(gerador, 0x83); emite_byte(gerador, 0xf8); emite_byte(gerador, 0x00); /* cmp $0,%eax */
+    emite_byte(gerador, 0x75);        /* jne rel8 */
+    desvio = gerador->tamanho;
+    emite_byte(gerador, 0x00);        /* placeholder */
+    gera_retorno(gerador, valor);
+    gerador->codigo[desvio] = (unsigned char)(gerador->tamanho - (desvio + 1));
 }
 
-/* Modulo 4: parsing das linhas LBS */
-
-static Operando parse_operando(const char *s)
+static Operando le_operando(const char *texto)
 {
     Operando op;
     op.valor = 0;
-    switch (s[0]) {
-    case 'v': op.tipo = OPD_VAR;   op.valor = atoi(s + 1); break;
+    switch (texto[0]) {
+    case 'v': op.tipo = OPD_VAR;   op.valor = atoi(texto + 1); break;
     case 'p': op.tipo = OPD_PARAM; break;
-    default:  op.tipo = OPD_CONST; op.valor = atoi(s + 1); break; /* '$' */
+    default:  op.tipo = OPD_CONST; op.valor = atoi(texto + 1); break; /* '$' */
     }
     return op;
 }
 
-static void trata_ret(Codigo *c, const char *linha)
+static void le_retorno(Gerador *gerador, const char *linha)
 {
-    char a[32];
-    sscanf(linha, "ret %31s", a);
-    traduz_ret(c, parse_operando(a));
+    char retorno[32];
+    sscanf(linha, "ret %31s", retorno);
+    gera_retorno(gerador, le_operando(retorno));
 }
 
-static void trata_zret(Codigo *c, const char *linha)
+static void le_retorno_condicional(Gerador *gerador, const char *linha)
 {
-    char a[32], b[32];
-    sscanf(linha, "zret %31s %31s", a, b);
-    traduz_zret(c, parse_operando(a), parse_operando(b));
+    char condicao[32], retorno[32];
+    sscanf(linha, "zret %31s %31s", condicao, retorno);
+    gera_retorno_condicional(gerador, le_operando(condicao), le_operando(retorno));
 }
 
-static void trata_atribuicao(Codigo *c, const char *linha, const int offsets[])
+static void le_atribuicao(Gerador *gerador, const char *linha, const int inicio_funcoes[])
 {
-    int dst;
-    char t1[32], t2[32], t3[32];
+    int destino;
+    char primeiro[32], operador[32], segundo[32];
 
-    sscanf(linha, "v%d = %31s %31s %31s", &dst, t1, t2, t3);
-    if (strcmp(t1, "call") == 0)
-        traduz_call(c, dst, atoi(t2), parse_operando(t3), offsets);
+    sscanf(linha, "v%d = %31s %31s %31s", &destino, primeiro, operador, segundo);
+    if (strcmp(primeiro, "call") == 0)
+        gera_chamada(gerador, destino, atoi(operador), le_operando(segundo), inicio_funcoes);
     else
-        traduz_oper(c, dst, parse_operando(t1), t2[0], parse_operando(t3));
+        gera_operacao(gerador, destino, le_operando(primeiro), operador[0], le_operando(segundo));
 }
 
-/* Funcao principal */
- 
 void gera_codigo(FILE *f, unsigned char code[], funcp *entry)
 {
-    Codigo c;
+    Gerador gerador;
     char linha[MAX_LINHA];
-    int offsets[MAX_FUNCS];
-    int nfuncs = 0;
+    int inicio_funcoes[MAX_FUNCS];
+    int qtd_funcoes = 0;
 
-    c.buf = code;
-    c.pos = 0;
+    gerador.codigo = code;
+    gerador.tamanho = 0;
     *entry = NULL;
 
     while (fgets(linha, sizeof linha, f) != NULL) {
         if (strncmp(linha, "function", 8) == 0) {
-            offsets[nfuncs++] = c.pos;
-            emite_prologo(&c);
+            inicio_funcoes[qtd_funcoes++] = gerador.tamanho;
+            abre_funcao(&gerador);
         } else if (strncmp(linha, "end", 3) == 0) {
             /* nada a emitir: o ret da funcao ja gera o epilogo */
         } else if (strncmp(linha, "ret", 3) == 0) {
-            trata_ret(&c, linha);
+            le_retorno(&gerador, linha);
         } else if (strncmp(linha, "zret", 4) == 0) {
-            trata_zret(&c, linha);
+            le_retorno_condicional(&gerador, linha);
         } else if (linha[0] == 'v') {
-            trata_atribuicao(&c, linha, offsets);
+            le_atribuicao(&gerador, linha, inicio_funcoes);
         }
     }
 
-    if (nfuncs > 0)
-        *entry = (funcp)(code + offsets[nfuncs - 1]);
+    if (qtd_funcoes > 0)
+        *entry = (funcp)(code + inicio_funcoes[qtd_funcoes - 1]);
 }
