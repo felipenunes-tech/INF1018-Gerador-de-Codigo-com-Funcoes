@@ -6,8 +6,6 @@
 #include <string.h>
 #include "gera_codigo.h"
 
-
-
 #define MAX_LINHA   256
 #define MAX_FUNCS   50
 #define NUM_VARS    5
@@ -26,18 +24,16 @@ typedef enum { OPD_VAR, OPD_PARAM, OPD_CONST } TipoOperando;
 
 typedef struct {
     TipoOperando tipo;
-    int valor;              /* indice da variavel ou valor da constante */
+    int valor; /* indice da variavel ou valor da constante */
 } Operando;
 
 typedef struct {
-    unsigned char *buf;     /* vetor code passado pelo usuario */
-    int pos;                /* proxima posicao livre */
+    unsigned char *buf;/* vetor code passado pelo usuario */
+    int pos; /* proxima posicao livre */
 } Codigo;
 
-/* ------------------------------------------------------------------ */
-/* Modulo 1: emissao de bytes                                          */
-/* ------------------------------------------------------------------ */
-
+/* Modulo 1: emissao de bytes       */
+ 
 static void emite_byte(Codigo *c, unsigned char b)
 {
     c->buf[c->pos++] = b;
@@ -51,10 +47,8 @@ static void emite_int32(Codigo *c, int v)
         emite_byte(c, (unsigned char)((u >> (8 * i)) & 0xFF));
 }
 
-/* ------------------------------------------------------------------ */
-/* Modulo 2: instrucoes x86-64 basicas                                 */
-/* ------------------------------------------------------------------ */
-
+/* Modulo 2: instrucoes x86-64 basicas    */
+ 
 static int offset_operando(Operando op)
 {
     if (op.tipo == OPD_PARAM)
@@ -66,10 +60,10 @@ static int offset_operando(Operando op)
 static void emite_carrega(Codigo *c, Reg r, Operando op)
 {
     if (op.tipo == OPD_CONST) {
-        emite_byte(c, 0xb8 + r);                 /* mov $imm32, %reg */
+        emite_byte(c, 0xb8 + r); /* mov $imm32, %reg */
         emite_int32(c, op.valor);
     } else {
-        emite_byte(c, 0x8b);                     /* mov disp8(%rbp), %reg */
+        emite_byte(c, 0x8b); /* mov disp8(%rbp), %reg */
         emite_byte(c, 0x45 | (r << 3));
         emite_byte(c, (unsigned char)offset_operando(op));
     }
@@ -79,7 +73,7 @@ static void emite_carrega(Codigo *c, Reg r, Operando op)
 static void emite_guarda_var(Codigo *c, Reg r, int idx)
 {
     Operando v = { OPD_VAR, idx };
-    emite_byte(c, 0x89);                         /* mov %reg, disp8(%rbp) */
+    emite_byte(c, 0x89);    /* mov %reg, disp8(%rbp) */
     emite_byte(c, 0x45 | (r << 3));
     emite_byte(c, (unsigned char)offset_operando(v));
 }
@@ -103,10 +97,8 @@ static void emite_epilogo(Codigo *c)
     emite_byte(c, 0xc3);
 }
 
-/* ------------------------------------------------------------------ */
-/* Modulo 3: traducao de cada comando LBS                              */
-/* ------------------------------------------------------------------ */
-
+/* Modulo 3: traducao de cada comando LBS */
+ 
 /* v<dst> = a op b */
 static void traduz_oper(Codigo *c, int dst, Operando a, char op, Operando b)
 {
@@ -116,18 +108,17 @@ static void traduz_oper(Codigo *c, int dst, Operando a, char op, Operando b)
     case '+': emite_byte(c, 0x01); emite_byte(c, 0xc8); break; /* add %ecx,%eax  */
     case '-': emite_byte(c, 0x29); emite_byte(c, 0xc8); break; /* sub %ecx,%eax  */
     case '*': emite_byte(c, 0x0f); emite_byte(c, 0xaf);
-              emite_byte(c, 0xc1); break;                      /* imul %ecx,%eax */
+ emite_byte(c, 0xc1); break; /* imul %ecx,%eax */
     }
     emite_guarda_var(c, REG_EAX, dst);
 }
 
 /* v<dst> = call func arg */
-static void traduz_call(Codigo *c, int dst, int func, Operando arg,
-                        const int offsets[])
+static void traduz_call(Codigo *c, int dst, int func, Operando arg,const int offsets[])
 {
     int rel;
     emite_carrega(c, REG_EDI, arg);
-    emite_byte(c, 0xe8);                              /* call rel32 */
+    emite_byte(c, 0xe8); /* call rel32 */
     rel = offsets[func] - (c->pos + 4);
     emite_int32(c, rel);
     emite_guarda_var(c, REG_EAX, dst);
@@ -146,16 +137,14 @@ static void traduz_zret(Codigo *c, Operando a, Operando b)
     int pos_desvio;
     emite_carrega(c, REG_EAX, a);
     emite_byte(c, 0x83); emite_byte(c, 0xf8); emite_byte(c, 0x00); /* cmp $0,%eax */
-    emite_byte(c, 0x75);                                           /* jne rel8 */
+    emite_byte(c, 0x75);        /* jne rel8 */
     pos_desvio = c->pos;
-    emite_byte(c, 0x00);                                           /* placeholder */
+    emite_byte(c, 0x00);        /* placeholder */
     traduz_ret(c, b);
     c->buf[pos_desvio] = (unsigned char)(c->pos - (pos_desvio + 1));
 }
 
-/* ------------------------------------------------------------------ */
-/* Modulo 4: parsing das linhas LBS                                    */
-/* ------------------------------------------------------------------ */
+/* Modulo 4: parsing das linhas LBS */
 
 static Operando parse_operando(const char *s)
 {
@@ -195,10 +184,8 @@ static void trata_atribuicao(Codigo *c, const char *linha, const int offsets[])
         traduz_oper(c, dst, parse_operando(t1), t2[0], parse_operando(t3));
 }
 
-/* ------------------------------------------------------------------ */
-/* Funcao principal                                                    */
-/* ------------------------------------------------------------------ */
-
+/* Funcao principal */
+ 
 void gera_codigo(FILE *f, unsigned char code[], funcp *entry)
 {
     Codigo c;
