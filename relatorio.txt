@@ -12,18 +12,18 @@ Todas as funcionalidades pedidas no enunciado foram implementadas e estão funci
   - retorno incondicional (ret) e retorno condicional (zret).
   - retorno, via o parâmetro entry, do endereço da última função do arquivo.
  
-Cada função gerada começa com o prólogo padrão (push %rbp,mov %rsp,%rbp, sub $32,%rsp) e termina com leave/ret. As variáveis locais ficam na pilha (v0 em -4(%rbp) até v4 em -20(%rbp)), e o parâmetro p0 e copiado de %edi para -24(%rbp) no início da função, para não ser perdido quando a função faz uma chamada. O frame de 32 bytes mantem a pilha alinhada em 16 bytes nas chamadas.
+Cada função gerada começa com o prólogo padrão (push %rbp,mov %rsp,%rbp, sub $32,%rsp) e termina com leave/ret. As variáveis locais ficam na pilha (v0 em -4(%rbp) até v4 em -20(%rbp)), e o parâmetro p0 é copiado de %edi para -24(%rbp) no início da função, para não ser perdido quando a função faz uma chamada. O frame de 32 bytes mantem a pilha alinhada em 16 bytes nas chamadas.
  
-O código gerado usa apenas os registradores %eax, %ecx e %edi, que são caller-saved; por isso não e necessário salvar registradores callee-saved.
+O código gerado usa apenas os registradores %eax, %ecx e %edi, que são caller-saved, por isso não é necessário salvar registradores callee-saved.
  
  
-2. O QUE NÃO ESTA FUNCIONANDO:
+2. O QUE NÃO ESTÁ FUNCIONANDO:
  
-Não identificamos nenhum problema no funcionamento do código. Todos os testes que realizamos estão abaixo e produziram o resultado esperado.
+Não identificamos nenhum problema no funcionamento do código. Todos os testes que realizamos estão abaixo, na parte 3, e produziram o resultado esperado.
 Em contra partida, nosso trabalho enfrenta duas limitações que não afetam o desempenho do projeto. Essas limitações são:
 
    - O comando "end" não gera instruções. Uma função que não termine com "ret" (por exemplo, cuja última linha seja um "zret" ou uma atribuição) continua executando os bytes seguintes do vetor, podendo executar outra função ou causar falha de segmentação. Supomos, como nos exemplos do enunciado, que toda função termina com "ret".
-    - A função gera_codigo não recebe o tamanho do vetor code, então não verifica se o código gerado cabe nele. Cada linha LBS gera no máximo 16 bytes; um arquivo de 50 linhas pode gerar cerca de 800 bytes, mais que um vetor de 500 posições. Nos exemplos testados o código gerado ficou bem abaixo desse limite (o fatorial, por exemplo, gera 71 bytes).
+   - A função gera_codigo não recebe o tamanho do vetor code, então não verifica se o código gerado cabe nele. Cada linha LBS gera no máximo 16 bytes; um arquivo de 50 linhas pode gerar cerca de 800 bytes, mais que um vetor de 500 posições. Nos exemplos testados o código gerado ficou bem abaixo desse limite (o fatorial, por exemplo, gera 71 bytes).
  
 3. EXEMPLOS DE TESTE:
  
