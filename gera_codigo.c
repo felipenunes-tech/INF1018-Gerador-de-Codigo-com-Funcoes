@@ -1,5 +1,5 @@
 /* Felipe Nunes 2320615 3WA */
-/* Nome_do_Aluno2 Matricula 3WA */
+/* Manuela Borba  2510272 3WA */
 
 #include <stdio.h>
 #include <stdlib.h>

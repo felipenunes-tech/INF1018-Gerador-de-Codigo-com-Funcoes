@@ -1,7 +1,3 @@
-INF1018 - Software Básico - Trabalho 2026.2
-Gerador de Codigo com Funções (LBS)
-
-Integrantes:
 Felipe Nunes   2320615  3WA
 Manuela Borba  2510272  3WA
  
